@@ -20,6 +20,7 @@ import re
 import socket
 import sys
 import threading
+import time
 import types
 import uuid
 
@@ -237,7 +238,13 @@ class ZmqClient(object):
     """Client for ZMQ sockets."""
 
     def __init__(self, addr):
+        LOG.debug("BEGIN OPENING OUT-SOCKET ADDR %s, PUSH TYPE %s, BIND "
+                  "%s" % (addr, zmq.PUSH, False))
+        start = time.time()
         self.outq = ZmqSocket(addr, zmq.PUSH, bind=False)
+        end = time.time()
+        LOG.debug("ELAPSED TIME %s OPENING OUT-SOCKET ADDR %s, PUSH TYPE %s, BIND "
+                  "%s" % (end - start, addr, zmq.PUSH, False))
 
     def cast(self, msg_id, topic, data, envelope):
         msg_id = msg_id or 0
@@ -247,7 +254,11 @@ class ZmqClient(object):
             if six.PY3:
                 data = data.encode('utf-8')
             data = (msg_id, topic, b'cast', data)
+            LOG.debug("BEGIN SENDING DATA %s IN OUT-SOCKET", data)
+            start = time.time()
             self.outq.send([bytes(item) for item in data])
+            end = time.time()
+            LOG.debug("ELAPSED TIME %(t)s SENDING DATA %(d)s IN OUT-SOCKET", {'t': end - start, 'd': data})
             return
 
         rpc_envelope = rpc_common.serialize_msg(data[1])
@@ -402,8 +413,14 @@ class ZmqBaseReactor(ConsumerBase):
             raise RPCException("Bad input socktype")
 
         # Items push in.
+        LOG.debug("BEGIN OPENING IN-SOCKET ADDR %s, TYPE %s, BIND %s, SUBSCRIBE "
+                  "%s" % (in_addr, zmq_type_in, in_bind, subscribe))
+        start = time.time()
         inq = ZmqSocket(in_addr, zmq_type_in, bind=in_bind,
                         subscribe=subscribe)
+        end = time.time()
+        LOG.debug("ELAPSED TIME %s OPENING IN-SOCKET ADDR %s, TYPE %s, BIND %s, SUBSCRIBE "
+                  "%s" % (end - start, in_addr, zmq_type_in, in_bind, subscribe))
 
         self.proxies[inq] = proxy
         self.sockets.append(inq)
@@ -449,7 +466,11 @@ class ZmqProxy(ZmqBaseReactor):
     def consume(self, sock):
         ipc_dir = CONF.rpc_zmq_ipc_dir
 
+        LOG.debug("PROXY WAITING TO RECEIVE DATA")
+        start = time.time()
         data = sock.recv(copy=False)
+        e = time.time()
+        LOG.debug("ELAPSED TIME %s PROXY RECEIVED DATA: %s" % (e - start, data))
         topic = data[1].bytes
         if six.PY3:
             topic = topic.decode('utf-8')
@@ -474,9 +495,15 @@ class ZmqProxy(ZmqBaseReactor):
                         LOG.warn(emsg)
                         raise RPCException(emsg)
 
+                    LOG.debug("BEGIN OPENING OUT-SOCKET ADDR ipc://%s/zmq_topic_%s, TYPE %s, BIND "
+                  "%s" % (ipc_dir, topic, sock_type, True))
+                    start = time.time()
                     out_sock = ZmqSocket("ipc://%s/zmq_topic_%s" %
                                          (ipc_dir, topic),
                                          sock_type, bind=True)
+                    end = time.time()
+                    LOG.debug("ELAPSED TIME %s OPENING OUT-SOCKET ADDR ipc://%s/zmq_topic_%s, TYPE %s, BIND "
+                  "%s" % (end - start, ipc_dir, topic, sock_type, True))
                 except RPCException:
                     waiter.send_exception(*sys.exc_info())
                     return
@@ -493,8 +520,18 @@ class ZmqProxy(ZmqBaseReactor):
                 waiter.send(True)
 
                 while(True):
+                    LOG.debug("PUBLISHER WAITING TO GET DATA OF TOPIC %s, QUEUE %s, ID "
+                              "%s" % (topic, self.topic_proxy[topic], id(self.topic_proxy[topic])))
+                    start = time.time()
                     data = self.topic_proxy[topic].get()
+                    end = time.time()
+                    LOG.debug("ELAPPSED TIME %s PUBLISHER GOT DATA OF TOPIC %s, QUEUE %s, ID "
+                              "%s" % (end - start, topic, self.topic_proxy[topic], id(self.topic_proxy[topic])))
+                    LOG.debug("BEGIN PUBLISHER SENDING DATA %s IN OUT-SOCKET", data)
+                    start = time.time()
                     out_sock.send(data, copy=False)
+                    end = time.time()
+                    LOG.debug("ELAPSED TIME %(t)s PUBLISHER SENDING DATA %(d)s IN OUT-SOCKET", {'t': end - start, 'd': data})
 
             wait_sock_creation = eventlet.event.Event()
             eventlet.spawn(publisher, wait_sock_creation)
@@ -569,7 +606,11 @@ class ZmqReactor(ZmqBaseReactor):
 
     def consume(self, sock):
         # TODO(ewindisch): use zero-copy (i.e. references, not copying)
+        LOG.debug("CONSUMER WAITING TO RECEIVE DATA")
+        s = time.time()
         data = sock.recv()
+        e = time.time()
+        LOG.debug("ELAPSED TIME %s " % (e - s))
         LOG.debug("CONSUMER RECEIVED DATA: %s", data)
 
         proxy = self.proxies[sock]
@@ -706,19 +747,28 @@ def _call(addr, context, topic, msg, timeout=None,
     # TODO(ewindisch): have reply consumer with dynamic subscription mgmt
     with Timeout(timeout, exception=rpc_common.Timeout):
         try:
+            LOG.debug("BEGIN OPENING WAIT-SOCKET ADDR ipc://%s/zmq_topic_zmq_replies.%s, SUB TYPE %s, BIND %s, SUBSRIBE MSG_ID "
+                      "%s" % (CONF.rpc_zmq_ipc_dir, CONF.rpc_zmq_host, zmq.SUB, False, msg_id))
+            start = time.time()
             msg_waiter = ZmqSocket(
                 "ipc://%s/zmq_topic_zmq_replies.%s" %
                 (CONF.rpc_zmq_ipc_dir,
                  CONF.rpc_zmq_host),
                 zmq.SUB, subscribe=msg_id, bind=False
             )
+            end = time.time()
+            LOG.debug("ELAPSED TIME %s OPENING WAIT-SOCKET ADDR ipc://%s/zmq_topic_zmq_replies.%s, SUB TYPE %s, BIND %s, SUBSRIBE MSG_ID "
+                      "%s" % (end - start, CONF.rpc_zmq_ipc_dir, CONF.rpc_zmq_host, zmq.SUB, False, msg_id))
 
             LOG.debug("Sending cast: %s", topic)
             _cast(addr, context, topic, payload, envelope=envelope)
 
             LOG.debug("Cast sent; Waiting reply")
             # Blocks until receives reply
+            s = time.time()
             msg = msg_waiter.recv()
+            e = time.time()
+            LOG.debug("ELAPSED TIME %s Cast got reply for msg %s" % (e - s,  msg_id))
             if msg is None:
                 raise rpc_common.Timeout()
             LOG.debug("Received message: %s", msg)
